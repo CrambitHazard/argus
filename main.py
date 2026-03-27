@@ -1,6 +1,10 @@
+from utils.helpers import load_config
+
+
 def main() -> None:
     """Run the Argus entry point."""
-    print("Argus system initialized")
+    config = load_config()
+    print("Config loaded", config)
 
 
 if __name__ == "__main__":
