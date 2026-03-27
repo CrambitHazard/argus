@@ -87,19 +87,21 @@ def _append_entry_json(path: Path, entry: dict[str, Any]) -> None:
 
 
 def log_activity(config: dict[str, Any]) -> None:
-    """Poll the active window on an interval and append JSON log rows forever.
+    """Poll the active window on an interval until the user presses Ctrl+C.
 
     Args:
         config: Must include ``log_interval_seconds`` (sleep between samples).
 
     Raises:
         KeyError: If ``log_interval_seconds`` is missing.
-        KeyboardInterrupt: If the process is interrupted.
     """
     interval = int(config["log_interval_seconds"])
-    while True:
-        entry = _capture_entry()
-        out_path = _daily_log_path(config)
-        _append_entry_json(out_path, entry)
-        print(json.dumps(entry, ensure_ascii=False))
-        time.sleep(interval)
+    try:
+        while True:
+            entry = _capture_entry()
+            out_path = _daily_log_path(config)
+            _append_entry_json(out_path, entry)
+            print(json.dumps(entry, ensure_ascii=False))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("Logging stopped")
