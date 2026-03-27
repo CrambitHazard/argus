@@ -86,6 +86,44 @@ def _append_entry_json(path: Path, entry: dict[str, Any]) -> None:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
+def clean_logs(file_path: str | Path) -> None:
+    """Drop consecutive log rows with the same ``app`` and ``window_title``.
+
+    Args:
+        file_path: Path to a JSON file containing a list of log objects.
+
+    Returns:
+        None. The file is overwritten with the deduplicated list.
+
+    Raises:
+        FileNotFoundError: If ``file_path`` does not exist.
+        json.JSONDecodeError: If the file is not valid JSON.
+        OSError: If the file cannot be read or written.
+    """
+    path = Path(file_path)
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        data = []
+    cleaned: list[Any] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            cleaned.append(entry)
+            continue
+        app = entry.get("app", "")
+        title = entry.get("window_title", "")
+        if cleaned:
+            prev = cleaned[-1]
+            if isinstance(prev, dict):
+                same_app = prev.get("app", "") == app
+                same_title = prev.get("window_title", "") == title
+                if same_app and same_title:
+                    continue
+        cleaned.append(entry)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(cleaned, f, indent=4, ensure_ascii=False)
+
+
 def log_activity(config: dict[str, Any]) -> None:
     """Poll the active window on an interval until the user presses Ctrl+C.
 
