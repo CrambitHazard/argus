@@ -1,1 +1,2 @@
-# future dependencies
+pywin32
+psutil
