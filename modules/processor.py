@@ -1,7 +1,11 @@
 """Turn raw activity logs into session records."""
 
+import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+from utils.file_io import read_json
 
 _GAP_SECONDS = 15
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -316,6 +320,64 @@ def extract_tags(events: list[dict[str, Any]]) -> list[str]:
             if cat and cat not in skip_cats:
                 seen[cat] = None
     return sorted(seen.keys())
+
+
+_DAY_STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _date_for_day_state(path: Path, logs: list[dict[str, Any]]) -> str:
+    """Pick ``YYYY-MM-DD`` from the log filename or the first log row.
+
+    Args:
+        path: Path to the daily JSON log file.
+        logs: Raw log entries (may be empty).
+
+    Returns:
+        Date string, or empty if it cannot be inferred.
+    """
+    stem = path.stem
+    if _DAY_STEM_RE.match(stem):
+        return stem
+    if logs:
+        ts = str(logs[0].get("timestamp", ""))
+        if len(ts) >= 10:
+            prefix = ts[:10]
+            if _DAY_STEM_RE.match(prefix):
+                return prefix
+    return ""
+
+
+def build_day_state(log_file_path: str | Path) -> dict[str, Any]:
+    """Load a daily log file and produce sessions, metrics, and tags.
+
+    Args:
+        log_file_path: JSON file of log entries (array), e.g. ``YYYY-MM-DD.json``.
+
+    Returns:
+        Dict with ``date``, ``events`` (categorized sessions), ``metrics``,
+        ``tags``, and ``anomalies`` (empty list for now).
+
+    Raises:
+        FileNotFoundError: If the log file is missing.
+        json.JSONDecodeError: If the file is not valid JSON.
+        OSError: If the file cannot be read.
+    """
+    path = Path(log_file_path)
+    raw = read_json(path)
+    logs: list[dict[str, Any]] = raw if isinstance(raw, list) else []
+
+    events = build_sessions(logs)
+    apply_categories_to_sessions(events)
+    metrics = compute_metrics(events)
+    tags = extract_tags(events)
+
+    return {
+        "date": _date_for_day_state(path, logs),
+        "events": events,
+        "metrics": metrics,
+        "tags": tags,
+        "anomalies": [],
+    }
 
 
 def process_logs() -> None:
