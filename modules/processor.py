@@ -6,6 +6,35 @@ from typing import Any
 _GAP_SECONDS = 15
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# ---------------------------------------------------------------------------
+# Categories — edit this list only. Order matters: first matching rule wins.
+# Each rule: category name, substrings to find in window title, in app name.
+# ---------------------------------------------------------------------------
+CATEGORY_RULES: list[dict[str, Any]] = [
+    {
+        "category": "entertainment",
+        "title_contains": ["youtube", "manga"],
+        "app_contains": [],
+    },
+    {
+        "category": "coding",
+        "title_contains": ["code", "vscode"],
+        "app_contains": ["code.exe", "Cursor.exe", "devenv.exe"],
+    },
+    {
+        "category": "research",
+        "title_contains": ["chatgpt", "arxiv"],
+        "app_contains": [],
+    },
+    {
+        "category": "study",
+        "title_contains": ["iris", "chemical"],
+        "app_contains": [],
+    }
+]
+
+DEFAULT_CATEGORY = "general"
+
 
 def _parse_timestamp(value: str) -> datetime:
     """Parse a log ``timestamp`` string.
@@ -91,6 +120,38 @@ def build_sessions(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         },
     )
     return sessions
+
+
+def categorize_event(event: dict[str, Any]) -> str:
+    """Pick a category from ``CATEGORY_RULES`` using app and window title.
+
+    Args:
+        event: Dict with ``app`` and ``window_title`` (e.g. a session dict).
+
+    Returns:
+        Category string, or ``DEFAULT_CATEGORY`` when no rule matches.
+    """
+    title = str(event.get("window_title", "")).lower()
+    app = str(event.get("app", "")).lower()
+    for rule in CATEGORY_RULES:
+        label = str(rule["category"])
+        for needle in rule.get("title_contains", []):
+            if str(needle).lower() in title:
+                return label
+        for needle in rule.get("app_contains", []):
+            if str(needle).lower() in app:
+                return label
+    return DEFAULT_CATEGORY
+
+
+def apply_categories_to_sessions(sessions: list[dict[str, Any]]) -> None:
+    """Set ``category`` on each session using :func:`categorize_event`.
+
+    Args:
+        sessions: Session dicts from :func:`build_sessions`; updated in place.
+    """
+    for row in sessions:
+        row["category"] = categorize_event(row)
 
 
 def process_logs() -> None:
