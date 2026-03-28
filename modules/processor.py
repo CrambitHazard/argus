@@ -35,6 +35,49 @@ CATEGORY_RULES: list[dict[str, Any]] = [
 
 DEFAULT_CATEGORY = "general"
 
+# ---------------------------------------------------------------------------
+# Tags — edit here only. Sources:
+#   1) Words from ``window_title`` (split, lowercase, deduped).
+#   2) Each event's ``category`` (after categorization), if enabled.
+#   3) ``title_phrase_to_tag``: if phrase appears in title, add semantic tag.
+# ---------------------------------------------------------------------------
+TAG_EXTRACTION: dict[str, Any] = {
+    "min_length": 2,
+    "replace_with_space": ".,;:()[]{}\"'·|–—/",
+    "stopwords": [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    ],
+    "include_categories_as_tags": True,
+    "category_values_to_skip": ["general"],
+    "title_phrase_to_tag": [
+        ["elden ring", "gaming"],
+        ["python", "coding"],
+        ["cursor", "coding"],
+        ["manga","reading"],
+        ["novel","reading"],
+        ["tethercraft","writing"],
+        ["chemical","studying"]
+    ],
+}
+
 
 def _parse_timestamp(value: str) -> datetime:
     """Parse a log ``timestamp`` string.
@@ -182,6 +225,97 @@ def compute_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
         "app_usage": app_usage,
         "category_usage": category_usage,
     }
+
+
+def _title_tokens(title: str, settings: dict[str, Any]) -> list[str]:
+    """Split a window title into candidate tag strings.
+
+    Args:
+        title: Raw window title.
+        settings: Normally :data:`TAG_EXTRACTION`.
+
+    Returns:
+        Lowercase word tokens after filtering by length and stopwords.
+    """
+    min_len = int(settings.get("min_length", 2))
+    stops = {str(s).lower() for s in settings.get("stopwords", [])}
+    text = title.lower()
+    for ch in str(settings.get("replace_with_space", "")):
+        text = text.replace(ch, " ")
+    out: list[str] = []
+    for word in text.split():
+        w = word.strip("-_")
+        if len(w) >= min_len and w not in stops:
+            out.append(w)
+    return out
+
+
+def _phrase_rules_from_config(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build (phrase, tag) pairs longest-first for simple title substring checks.
+
+    Args:
+        cfg: Normally :data:`TAG_EXTRACTION`.
+
+    Returns:
+        List of ``(phrase_lower, tag_lower)`` sorted by phrase length descending.
+    """
+    raw = cfg.get("title_phrase_to_tag", [])
+    pairs: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            pairs.append((str(item[0]).lower(), str(item[1]).lower()))
+    pairs.sort(key=lambda x: -len(x[0]))
+    return pairs
+
+
+def _semantic_tags_from_title(title: str, phrase_rules: list[tuple[str, str]]) -> list[str]:
+    """Map title text to semantic tags using substring rules.
+
+    Args:
+        title: Window title.
+        phrase_rules: From :func:`_phrase_rules_from_config`.
+
+    Returns:
+        Tags implied by phrase matches (may repeat; caller dedupes).
+    """
+    hay = title.lower()
+    out: list[str] = []
+    for phrase, tag in phrase_rules:
+        if phrase in hay:
+            out.append(tag)
+    return out
+
+
+def extract_tags(events: list[dict[str, Any]]) -> list[str]:
+    """Unique tags from window titles, categories, and phrase rules.
+
+    Title words: split, lowercase, drop stopwords / short tokens.
+    Categories: each event's ``category`` value (optional skip list).
+    Phrases: see ``title_phrase_to_tag`` in :data:`TAG_EXTRACTION`.
+
+    Args:
+        events: Session-like dicts with ``window_title`` and optionally
+            ``category``.
+
+    Returns:
+        Sorted list of distinct tags.
+    """
+    cfg = TAG_EXTRACTION
+    phrase_rules = _phrase_rules_from_config(cfg)
+    skip_cats = {str(s).lower() for s in cfg.get("category_values_to_skip", [])}
+    include_cat = bool(cfg.get("include_categories_as_tags", True))
+    seen: dict[str, None] = {}
+    for row in events:
+        title = str(row.get("window_title", ""))
+        for token in _title_tokens(title, cfg):
+            seen[token] = None
+        for tag in _semantic_tags_from_title(title, phrase_rules):
+            seen[tag] = None
+        if include_cat:
+            cat = str(row.get("category", "")).strip().lower()
+            if cat and cat not in skip_cats:
+                seen[cat] = None
+    return sorted(seen.keys())
 
 
 def process_logs() -> None:
