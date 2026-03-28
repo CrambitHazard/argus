@@ -1,0 +1,20 @@
+{
+    "date": "YYYY-MM-DD",
+    "events": [
+      {
+        "start_time": "",
+        "end_time": "",
+        "duration_seconds": 0,
+        "app": "",
+        "window_title": "",
+        "category": ""
+      }
+    ],
+    "metrics": {
+      "total_time": 0,
+      "app_usage": {},
+      "category_usage": {}
+    },
+    "tags": [],
+    "anomalies": []
+  }
