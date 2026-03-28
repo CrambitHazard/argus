@@ -5,7 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from utils.file_io import read_json
+from utils.file_io import read_json, write_json
+from utils.helpers import load_config
 
 _GAP_SECONDS = 15
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -40,10 +41,11 @@ CATEGORY_RULES: list[dict[str, Any]] = [
 DEFAULT_CATEGORY = "general"
 
 # ---------------------------------------------------------------------------
-# Tags — edit here only. Sources:
-#   1) Words from ``window_title`` (split, lowercase, deduped).
-#   2) Each event's ``category`` (after categorization), if enabled.
-#   3) ``title_phrase_to_tag``: if phrase appears in title, add semantic tag.
+# Tags — edit here only.
+#   * ``title_phrase_to_tag``: phrases in the window title → semantic tags on
+#     each **session** (``events[].tags``). Also drives ``metrics.tag_usage``.
+#   * Optional extras for the day-level ``tags`` list (off by default):
+#     ``include_title_word_tags``, ``include_categories_in_day_tags_list``.
 # ---------------------------------------------------------------------------
 TAG_EXTRACTION: dict[str, Any] = {
     "min_length": 2,
@@ -69,7 +71,8 @@ TAG_EXTRACTION: dict[str, Any] = {
         "to",
         "with",
     ],
-    "include_categories_as_tags": True,
+    "include_title_word_tags": False,
+    "include_categories_in_day_tags_list": False,
     "category_values_to_skip": ["general"],
     "title_phrase_to_tag": [
         ["elden ring", "gaming"],
@@ -110,12 +113,47 @@ def _format_timestamp(value: datetime) -> str:
     return value.strftime(_TS_FORMAT)
 
 
-def build_sessions(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _recompute_session_durations(
+    sessions: list[dict[str, Any]], sampling_interval_seconds: int,
+) -> None:
+    """Assign ``duration_seconds`` so time is attributed until the next session.
+
+    Each session (except the last) gets duration = next ``start_time`` minus
+    this ``start_time``. The last session uses ``end_time - start_time``, or
+    ``sampling_interval_seconds`` when that span is zero (single sample).
+
+    Args:
+        sessions: Session dicts from the merge pass; updated in place.
+        sampling_interval_seconds: Config ``log_interval_seconds`` (minimum 1).
+    """
+    n = len(sessions)
+    if n == 0:
+        return
+    starts = [_parse_timestamp(str(s["start_time"])) for s in sessions]
+    ends = [_parse_timestamp(str(s["end_time"])) for s in sessions]
+    interval = max(1, int(sampling_interval_seconds))
+    for i in range(n - 1):
+        delta = (starts[i + 1] - starts[i]).total_seconds()
+        sessions[i]["duration_seconds"] = max(0, int(delta))
+    last = n - 1
+    span = int((ends[last] - starts[last]).total_seconds())
+    if span > 0:
+        sessions[last]["duration_seconds"] = span
+    else:
+        sessions[last]["duration_seconds"] = interval
+
+
+def build_sessions(
+    logs: list[dict[str, Any]],
+    sampling_interval_seconds: int = 5,
+) -> list[dict[str, Any]]:
     """Merge consecutive log rows into sessions (same app/title, gap ≤ 15s).
 
     Args:
         logs: Log dicts with ``timestamp``, ``app``, ``window_title``; sorted
             oldest-first.
+        sampling_interval_seconds: From config; used for the last session's
+            duration when only one sample exists in that session.
 
     Returns:
         Session dicts with ``start_time``, ``end_time``, ``duration_seconds``,
@@ -166,6 +204,7 @@ def build_sessions(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "window_title": window_title,
         },
     )
+    _recompute_session_durations(sessions, sampling_interval_seconds)
     return sessions
 
 
@@ -201,20 +240,36 @@ def apply_categories_to_sessions(sessions: list[dict[str, Any]]) -> None:
         row["category"] = categorize_event(row)
 
 
-def compute_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Sum session durations by total, app, and category.
+def apply_semantic_tags_to_sessions(sessions: list[dict[str, Any]]) -> None:
+    """Set ``tags`` on each session from ``title_phrase_to_tag`` substring rules.
 
     Args:
-        events: Session-like dicts with ``duration_seconds``, ``app``, and
-            optionally ``category`` (defaults to :data:`DEFAULT_CATEGORY`).
+        sessions: Session dicts with ``window_title``; updated in place.
+    """
+    rules = _phrase_rules_from_config(TAG_EXTRACTION)
+    for row in sessions:
+        title = str(row.get("window_title", ""))
+        ordered: dict[str, None] = {}
+        for tag in _semantic_tags_from_title(title, rules):
+            ordered.setdefault(tag, None)
+        row["tags"] = list(ordered.keys())
+
+
+def compute_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum session durations by total, app, category, and semantic tags.
+
+    Args:
+        events: Session-like dicts with ``duration_seconds``, ``app``, optional
+            ``category``, and optional ``tags`` (list of strings).
 
     Returns:
-        ``total_time`` (seconds), ``app_usage`` and ``category_usage`` maps
-        from name to summed seconds (ints).
+        ``total_time``, ``app_usage``, ``category_usage``, and ``tag_usage``
+        (seconds per semantic tag from ``title_phrase_to_tag``).
     """
     total_time = 0
     app_usage: dict[str, int] = {}
     category_usage: dict[str, int] = {}
+    tag_usage: dict[str, int] = {}
 
     for row in events:
         seconds = int(row.get("duration_seconds", 0))
@@ -223,11 +278,16 @@ def compute_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
         app_usage[app] = app_usage.get(app, 0) + seconds
         cat = str(row.get("category", DEFAULT_CATEGORY))
         category_usage[cat] = category_usage.get(cat, 0) + seconds
+        for tag in row.get("tags", []):
+            t = str(tag).strip().lower()
+            if t:
+                tag_usage[t] = tag_usage.get(t, 0) + seconds
 
     return {
         "total_time": total_time,
         "app_usage": app_usage,
         "category_usage": category_usage,
+        "tag_usage": tag_usage,
     }
 
 
@@ -291,31 +351,35 @@ def _semantic_tags_from_title(title: str, phrase_rules: list[tuple[str, str]]) -
 
 
 def extract_tags(events: list[dict[str, Any]]) -> list[str]:
-    """Unique tags from window titles, categories, and phrase rules.
+    """Distinct day-level tags: union of each session's ``tags`` by default.
 
-    Title words: split, lowercase, drop stopwords / short tokens.
-    Categories: each event's ``category`` value (optional skip list).
-    Phrases: see ``title_phrase_to_tag`` in :data:`TAG_EXTRACTION`.
+    Optional: ``include_title_word_tags`` and
+    ``include_categories_in_day_tags_list`` in :data:`TAG_EXTRACTION`.
 
     Args:
-        events: Session-like dicts with ``window_title`` and optionally
-            ``category``.
+        events: Sessions after :func:`apply_semantic_tags_to_sessions`.
 
     Returns:
-        Sorted list of distinct tags.
+        Sorted list of distinct tag strings.
     """
     cfg = TAG_EXTRACTION
-    phrase_rules = _phrase_rules_from_config(cfg)
-    skip_cats = {str(s).lower() for s in cfg.get("category_values_to_skip", [])}
-    include_cat = bool(cfg.get("include_categories_as_tags", True))
     seen: dict[str, None] = {}
     for row in events:
-        title = str(row.get("window_title", ""))
-        for token in _title_tokens(title, cfg):
-            seen[token] = None
-        for tag in _semantic_tags_from_title(title, phrase_rules):
-            seen[tag] = None
-        if include_cat:
+        for tag in row.get("tags", []):
+            t = str(tag).strip().lower()
+            if t:
+                seen[t] = None
+    if cfg.get("include_title_word_tags", False):
+        phrase_rules = _phrase_rules_from_config(cfg)
+        for row in events:
+            title = str(row.get("window_title", ""))
+            for token in _title_tokens(title, cfg):
+                seen[token] = None
+            for tag in _semantic_tags_from_title(title, phrase_rules):
+                seen[tag] = None
+    if cfg.get("include_categories_in_day_tags_list", False):
+        skip_cats = {str(s).lower() for s in cfg.get("category_values_to_skip", [])}
+        for row in events:
             cat = str(row.get("category", "")).strip().lower()
             if cat and cat not in skip_cats:
                 seen[cat] = None
@@ -347,15 +411,20 @@ def _date_for_day_state(path: Path, logs: list[dict[str, Any]]) -> str:
     return ""
 
 
-def build_day_state(log_file_path: str | Path) -> dict[str, Any]:
+def build_day_state(
+    log_file_path: str | Path,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Load a daily log file and produce sessions, metrics, and tags.
 
     Args:
         log_file_path: JSON file of log entries (array), e.g. ``YYYY-MM-DD.json``.
+        config: Optional loaded config (for ``log_interval_seconds``). If
+            omitted, :func:`utils.helpers.load_config` is used.
 
     Returns:
-        Dict with ``date``, ``events`` (categorized sessions), ``metrics``,
-        ``tags``, and ``anomalies`` (empty list for now).
+        Dict with ``date``, ``events`` (categorized sessions with ``tags``),
+        ``metrics`` (includes ``tag_usage``), ``tags``, and ``anomalies``.
 
     Raises:
         FileNotFoundError: If the log file is missing.
@@ -366,8 +435,11 @@ def build_day_state(log_file_path: str | Path) -> dict[str, Any]:
     raw = read_json(path)
     logs: list[dict[str, Any]] = raw if isinstance(raw, list) else []
 
-    events = build_sessions(logs)
+    cfg = config if config is not None else load_config()
+    interval = int(cfg.get("log_interval_seconds", 5))
+    events = build_sessions(logs, sampling_interval_seconds=interval)
     apply_categories_to_sessions(events)
+    apply_semantic_tags_to_sessions(events)
     metrics = compute_metrics(events)
     tags = extract_tags(events)
 
@@ -380,6 +452,37 @@ def build_day_state(log_file_path: str | Path) -> dict[str, Any]:
     }
 
 
-def process_logs() -> None:
-    """Placeholder log processor."""
-    print("process_logs")
+def _pick_latest_log_file(logs_dir: Path) -> Path | None:
+    """Newest ``YYYY-MM-DD.json`` in a directory, else newest ``*.json`` by mtime.
+
+    Args:
+        logs_dir: Folder under the project that holds raw daily logs.
+
+    Returns:
+        Chosen file path, or ``None`` if there are no JSON files.
+    """
+    if not logs_dir.is_dir():
+        return None
+    daily = [p for p in logs_dir.glob("*.json") if _DAY_STEM_RE.match(p.stem)]
+    if daily:
+        return max(daily, key=lambda p: p.stem)
+    any_json = list(logs_dir.glob("*.json"))
+    if not any_json:
+        return None
+    return max(any_json, key=lambda p: p.stat().st_mtime)
+
+
+def process_logs(config: dict[str, Any]) -> None:
+    """Load latest raw log, build day state, save under ``data/processed``."""
+    root = Path(__file__).resolve().parent.parent
+    logs_dir = root / Path(config["data_paths"]["logs"])
+    proc_dir = root / Path(config["data_paths"]["processed"])
+    latest = _pick_latest_log_file(logs_dir)
+    if latest is None:
+        print(f"No log JSON files found in {logs_dir}")
+        return
+    state = build_day_state(latest, config)
+    day_key = state.get("date") or latest.stem
+    out_path = proc_dir / f"{day_key}.json"
+    write_json(out_path, state)
+    print(f"Processed {latest.name} -> {out_path}")
