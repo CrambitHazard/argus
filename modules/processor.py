@@ -154,6 +154,36 @@ def apply_categories_to_sessions(sessions: list[dict[str, Any]]) -> None:
         row["category"] = categorize_event(row)
 
 
+def compute_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum session durations by total, app, and category.
+
+    Args:
+        events: Session-like dicts with ``duration_seconds``, ``app``, and
+            optionally ``category`` (defaults to :data:`DEFAULT_CATEGORY`).
+
+    Returns:
+        ``total_time`` (seconds), ``app_usage`` and ``category_usage`` maps
+        from name to summed seconds (ints).
+    """
+    total_time = 0
+    app_usage: dict[str, int] = {}
+    category_usage: dict[str, int] = {}
+
+    for row in events:
+        seconds = int(row.get("duration_seconds", 0))
+        total_time += seconds
+        app = str(row.get("app", ""))
+        app_usage[app] = app_usage.get(app, 0) + seconds
+        cat = str(row.get("category", DEFAULT_CATEGORY))
+        category_usage[cat] = category_usage.get(cat, 0) + seconds
+
+    return {
+        "total_time": total_time,
+        "app_usage": app_usage,
+        "category_usage": category_usage,
+    }
+
+
 def process_logs() -> None:
     """Placeholder log processor."""
     print("process_logs")
