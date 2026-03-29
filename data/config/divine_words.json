@@ -1,0 +1,22 @@
+{
+    "Focus": {
+      "conditions": ["coding", "learning"],
+      "weight": 1.0
+    },
+    "Drift": {
+      "conditions": ["entertainment", "browsing"],
+      "weight": 1.0
+    },
+    "Growth": {
+      "conditions": ["learning"],
+      "weight": 1.2
+    },
+    "Chaos": {
+      "conditions": ["rapid_context_switch"],
+      "weight": 1.5
+    },
+    "Creation": {
+      "conditions": ["reading","writing"],
+      "weight": 0.8
+    }
+  }
