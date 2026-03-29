@@ -16,6 +16,19 @@ except ImportError:
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL = "openai/gpt-4o-mini"
 _DEFAULT_TIMEOUT = 60.0
+_CONNECT_TIMEOUT = 30.0
+
+
+def _read_timeout_seconds(minimum_read: float) -> float:
+    """Combine caller minimum with optional ``OPENROUTER_TIMEOUT`` (seconds to wait for response body)."""
+    read = max(30.0, float(minimum_read))
+    raw = (os.environ.get("OPENROUTER_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            read = max(read, float(raw))
+        except ValueError:
+            pass
+    return read
 
 
 def generate_text(
@@ -23,6 +36,7 @@ def generate_text(
     *,
     model: str | None = None,
     timeout_seconds: float = _DEFAULT_TIMEOUT,
+    max_tokens: int | None = None,
 ) -> str:
     """Call OpenRouter chat completions and return assistant message text only.
 
@@ -33,7 +47,11 @@ def generate_text(
     Args:
         prompt: User message content.
         model: OpenRouter model id; overrides ``OPENROUTER_MODEL`` when set.
-        timeout_seconds: Request timeout in seconds.
+        timeout_seconds: Minimum read timeout in seconds (connect is fixed shorter).
+            Also set ``OPENROUTER_TIMEOUT`` in the environment to raise the read cap
+            (useful for long diary generations).
+        max_tokens: Optional cap on generated tokens (larger = longer replies).
+            If omitted, uses provider default. Also set ``OPENROUTER_MAX_TOKENS``.
 
     Returns:
         Trimmed assistant text, or empty string on failure (after a short
@@ -67,16 +85,28 @@ def generate_text(
         "model": resolved_model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    token_cap = max_tokens
+    if token_cap is None:
+        raw_cap = (os.environ.get("OPENROUTER_MAX_TOKENS") or "").strip()
+        if raw_cap.isdigit():
+            token_cap = int(raw_cap)
+    if token_cap is not None and token_cap > 0:
+        body["max_tokens"] = int(token_cap)
 
+    read_timeout = _read_timeout_seconds(timeout_seconds)
+    timeouts = (_CONNECT_TIMEOUT, read_timeout)
     try:
         response = requests.post(
             _OPENROUTER_URL,
             headers=headers,
             json=body,
-            timeout=timeout_seconds,
+            timeout=timeouts,
         )
     except requests.exceptions.Timeout:
-        print(f"[OpenRouter] timeout after {timeout_seconds}s")
+        print(
+            f"[OpenRouter] timeout (connect {_CONNECT_TIMEOUT}s, read {read_timeout}s). "
+            "Raise OPENROUTER_TIMEOUT in .env if generations are slow.",
+        )
         return ""
     except requests.exceptions.RequestException as exc:
         print(f"[OpenRouter] request failed: {exc}")
@@ -106,22 +136,48 @@ def generate_text(
     if not isinstance(first, dict):
         return ""
 
+    # Legacy completion shape: text on the choice itself
+    legacy = first.get("text")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+
     message = first.get("message")
     if not isinstance(message, dict):
         print("[OpenRouter] missing message in choice")
         return ""
 
+    refusal = message.get("refusal")
+    if refusal is not None and str(refusal).strip():
+        print("[OpenRouter] model returned a refusal instead of normal content")
+        return str(refusal).strip()
+
     content = message.get("content")
-    if content is None:
-        return ""
 
     if isinstance(content, list):
         chunks: list[str] = []
         for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                chunks.append(str(part.get("text", "")))
+            if isinstance(part, dict):
+                if part.get("type") == "text" and part.get("text"):
+                    chunks.append(str(part.get("text", "")))
+                elif part.get("type") == "output_text" and part.get("text"):
+                    chunks.append(str(part.get("text", "")))
             elif isinstance(part, str):
                 chunks.append(part)
-        return "".join(chunks).strip()
+        out = "".join(chunks).strip()
+        if out:
+            return out
+    elif isinstance(content, str) and content.strip():
+        return content.strip()
 
-    return str(content).strip()
+    # Some reasoning models expose only reasoning fields when content is empty
+    for key in ("reasoning", "reasoning_content", "reasoning_details"):
+        alt = message.get(key)
+        if alt is not None and str(alt).strip():
+            print(f"[OpenRouter] using {key} as body (content was empty)")
+            return str(alt).strip()
+
+    print(
+        "[OpenRouter] empty assistant message (check model id, credits, and "
+        "whether the provider returned an unsupported shape)",
+    )
+    return ""

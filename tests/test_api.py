@@ -32,7 +32,42 @@ def test_generate_text_success(mock_post: MagicMock) -> None:
     args, kwargs = mock_post.call_args
     assert kwargs["json"]["model"] == "other/model"
     assert kwargs["json"]["messages"][0]["content"] == "ping"
-    assert kwargs["timeout"] == api._DEFAULT_TIMEOUT
+    assert kwargs["timeout"] == (api._CONNECT_TIMEOUT, 60.0)
+    assert "max_tokens" not in kwargs["json"]
+
+
+@patch("utils.api.requests.post")
+def test_generate_text_passes_max_tokens(mock_post: MagicMock) -> None:
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+    mock_post.return_value = mock_resp
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}, clear=False):
+        api.generate_text("x", max_tokens=500)
+    assert mock_post.call_args.kwargs["json"]["max_tokens"] == 500
+
+
+@patch("utils.api.requests.post")
+def test_generate_text_legacy_choice_text(mock_post: MagicMock) -> None:
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"choices": [{"text": " legacy "}]}
+    mock_post.return_value = mock_resp
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}, clear=False):
+        assert api.generate_text("x") == "legacy"
+
+
+@patch("utils.api.requests.post")
+def test_generate_text_reasoning_when_content_empty(mock_post: MagicMock, capsys) -> None:
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "", "reasoning": "inner"}}],
+    }
+    mock_post.return_value = mock_resp
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}, clear=False):
+        assert api.generate_text("x") == "inner"
+    assert "reasoning" in capsys.readouterr().out.lower()
 
 
 @patch("utils.api.requests.post")
