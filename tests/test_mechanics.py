@@ -29,6 +29,35 @@ def test_load_json_config_missing_file() -> None:
     assert load_json_config(Path("/nonexistent/path/divine.json")) == {}
 
 
+def test_creation_counts_reading_from_tag_usage() -> None:
+    """``reading`` / ``writing`` in config match ``tag_usage``, not only categories."""
+    root = Path(__file__).resolve().parent.parent
+    cfg = root / "data" / "config" / "divine_words.json"
+    day_state = {
+        "metrics": {
+            "category_usage": {},
+            "tag_usage": {"reading": 230},
+        },
+    }
+    out = compute_divine_words(day_state, cfg)
+    assert out["scores"]["Creation"] == 1.0
+    assert "Creation" in out["dominant_words"]
+
+
+def test_same_label_in_category_and_tag_not_doubled() -> None:
+    """Per condition we take max(category, tag), not the sum."""
+    root = Path(__file__).resolve().parent.parent
+    cfg = root / "data" / "config" / "divine_words.json"
+    day_state = {
+        "metrics": {
+            "category_usage": {"coding": 100},
+            "tag_usage": {"coding": 100},
+        },
+    }
+    out = compute_divine_words(day_state, cfg)
+    assert out["scores"]["Focus"] == 1.0
+
+
 def test_no_category_usage_all_zero_scores() -> None:
     root = Path(__file__).resolve().parent.parent
     cfg = root / "data" / "config" / "divine_words.json"

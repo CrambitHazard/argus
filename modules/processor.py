@@ -5,8 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from modules.glitches import detect_glitches
+from modules.mechanics import compute_divine_words
 from utils.file_io import read_json, write_json
 from utils.helpers import load_config
+from utils.processed_history import load_last_n_processed_day_states
 
 _GAP_SECONDS = 15
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -23,7 +26,7 @@ CATEGORY_RULES: list[dict[str, Any]] = [
     },
     {
         "category": "coding",
-        "title_contains": ["code", "vscode"],
+        "title_contains": ["code", "vscode", "GitHub"],
         "app_contains": ["code.exe", "Cursor.exe", "devenv.exe"],
     },
     {
@@ -452,6 +455,46 @@ def build_day_state(
     }
 
 
+def enrich_day_state_with_mechanics(
+    state: dict[str, Any],
+    config: dict[str, Any],
+    project_root: Path,
+) -> None:
+    """Attach ``divine_words`` and ``glitches`` to ``state`` (mutates in place).
+
+    Divine words use ``compute_divine_words`` and config path
+    ``divine_words_config``. Glitches use ``detect_glitches`` against the last
+    ``glitch_lookback_days`` processed files strictly before ``state["date"]``.
+
+    Args:
+        state: Output of :func:`build_day_state`.
+        config: Loaded Argus config (paths and optional mechanics keys).
+        project_root: Repository root (parent of ``modules/``).
+    """
+    divine_rel = config.get("divine_words_config", "data/config/divine_words.json")
+    divine_path = project_root / Path(divine_rel)
+    divine_result = compute_divine_words(state, divine_path)
+    state["divine_words"] = {
+        "scores": divine_result["scores"],
+        "dominant": divine_result["dominant_words"],
+    }
+
+    proc_rel = config.get("data_paths", {}).get("processed", "data/processed/")
+    proc_dir = project_root / Path(proc_rel)
+    try:
+        lookback = int(config.get("glitch_lookback_days", 7))
+    except (TypeError, ValueError):
+        lookback = 7
+    lookback = max(0, lookback)
+    current_date = str(state.get("date", ""))
+    past_states = load_last_n_processed_day_states(
+        proc_dir,
+        lookback,
+        before_date=current_date or None,
+    )
+    state["glitches"] = detect_glitches(state, past_states)
+
+
 def _pick_latest_log_file(logs_dir: Path) -> Path | None:
     """Newest ``YYYY-MM-DD.json`` in a directory, else newest ``*.json`` by mtime.
 
@@ -482,6 +525,9 @@ def process_logs(config: dict[str, Any]) -> None:
         print(f"No log JSON files found in {logs_dir}")
         return
     state = build_day_state(latest, config)
+    if not state.get("date"):
+        state["date"] = latest.stem
+    enrich_day_state_with_mechanics(state, config, root)
     day_key = state.get("date") or latest.stem
     out_path = proc_dir / f"{day_key}.json"
     write_json(out_path, state)

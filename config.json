@@ -4,5 +4,7 @@
       "logs": "data/logs/",
       "processed": "data/processed/",
       "outputs": "data/outputs/"
-    }
+    },
+    "divine_words_config": "data/config/divine_words.json",
+    "glitch_lookback_days": 7
   }

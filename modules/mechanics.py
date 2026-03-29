@@ -28,29 +28,65 @@ def load_json_config(config_path: str | Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _category_seconds_for_conditions(
+def _float_metric(mapping: dict[str, Any], key: str) -> float:
+    """Parse a numeric value from a metrics map, or 0.0 if missing/invalid."""
+    raw = mapping.get(key, 0)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _seconds_for_condition_label(
     category_usage: dict[str, Any],
-    conditions: Any,
+    tag_usage: dict[str, Any],
+    label: str,
 ) -> float:
-    """Sum seconds for each category name listed in ``conditions``.
+    """Seconds for one condition string, using categories and/or semantic tags.
+
+    Argus stores broad **categories** (e.g. entertainment) in
+    ``category_usage`` and phrase-driven **tags** (e.g. reading, writing) in
+    ``tag_usage``. The same label rarely needs both; when it appears in both,
+    we take the **max** so one session is not double-counted.
 
     Args:
-        category_usage: Map category name -> seconds (from ``day_state``).
-        conditions: Iterable of category strings, or invalid types yield 0.
+        category_usage: ``metrics.category_usage``.
+        tag_usage: ``metrics.tag_usage``.
+        label: One entry from a divine word's ``conditions`` list.
 
     Returns:
-        Total seconds attributed to those categories (missing keys count as 0).
+        Seconds attributed to that label for scoring.
+    """
+    key = str(label)
+    cat_part = _float_metric(category_usage, key)
+    tag_part = _float_metric(tag_usage, key)
+    return max(cat_part, tag_part)
+
+
+def _matched_seconds_for_conditions(
+    category_usage: dict[str, Any],
+    tag_usage: dict[str, Any],
+    conditions: Any,
+) -> float:
+    """Sum per-label seconds for all strings in ``conditions``.
+
+    Args:
+        category_usage: Map category -> seconds.
+        tag_usage: Map tag -> seconds.
+        conditions: List of labels to match in either map (see above).
+
+    Returns:
+        Total seconds for the divine word's condition list.
     """
     if not isinstance(conditions, list):
         return 0.0
     total = 0.0
-    for cat in conditions:
-        key = str(cat)
-        raw = category_usage.get(key, 0)
-        try:
-            total += float(raw)
-        except (TypeError, ValueError):
-            continue
+    for item in conditions:
+        total += _seconds_for_condition_label(
+            category_usage,
+            tag_usage,
+            str(item),
+        )
     return total
 
 
@@ -76,23 +112,22 @@ def compute_divine_words(
     day_state: dict[str, Any],
     config_path: str | Path,
 ) -> dict[str, Any]:
-    """Score divine words from category time and weighted JSON rules.
+    """Score divine words from category + tag time and weighted JSON rules.
 
-    For each word in the config, matched seconds are the sum of
-    ``metrics.category_usage`` over that word's ``conditions`` categories,
-    multiplied by ``weight``. Scores are then max-normalized to [0, 1] for
-    stable comparison. ``dominant_words`` are the top labels by normalized
-    score (ties broken alphabetically), excluding zero scores.
+    Each ``conditions`` label is matched against **both**
+    ``metrics.category_usage`` and ``metrics.tag_usage`` (semantic tags from
+    phrase rules). Per label we use ``max(category_seconds, tag_seconds)`` so
+    overlapping keys are not double-counted; labels in the list are **summed**
+    (e.g. Creation: reading + writing).
 
     Args:
-        day_state: Argus day state with ``metrics.category_usage``.
+        day_state: Argus day state with ``metrics.category_usage`` and
+            ``metrics.tag_usage``.
         config_path: Path to divine word rules (see ``data/config/divine_words.json``).
 
     Returns:
-        ``scores``: normalized float per configured word (0 when no category match).
-        ``dominant_words``: up to ``dominant_count`` names with score > 0, sorted
-        best-first. Optional config key ``_settings`` may include
-        ``"dominant_count": int`` (default 3).
+        ``scores``: max-normalized floats. ``dominant_words``: top names with
+        score > 0. Optional ``_settings.dominant_count`` in the JSON config.
     """
     rules = load_json_config(config_path)
     settings = rules.get("_settings", {})
@@ -107,8 +142,11 @@ def compute_divine_words(
     category_usage = metrics.get("category_usage", {})
     if not isinstance(category_usage, dict):
         category_usage = {}
+    tag_usage = metrics.get("tag_usage", {})
+    if not isinstance(tag_usage, dict):
+        tag_usage = {}
 
-    # 1) Raw weighted score = (sum of seconds in listed categories) * weight
+    # 1) Raw weighted score = (sum over conditions, each max(cat, tag)) * weight
     raw_scores: dict[str, float] = {}
     for word_label, rule in rules.items():
         if word_label.startswith("_"):
@@ -120,7 +158,11 @@ def compute_divine_words(
             weight = float(rule.get("weight", 1.0))
         except (TypeError, ValueError):
             weight = 1.0
-        matched_seconds = _category_seconds_for_conditions(category_usage, conditions)
+        matched_seconds = _matched_seconds_for_conditions(
+            category_usage,
+            tag_usage,
+            conditions,
+        )
         raw_scores[str(word_label)] = matched_seconds * weight
 
     # 2) Normalize so the strongest signal is 1.0 (deterministic, explainable)
